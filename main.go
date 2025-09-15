@@ -1,14 +1,44 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
+	"log"
 	"math/rand"
 	"net/http"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
-// In-memory store for testing
-var urlStore = make(map[string]string)
+
+var db *sql.DB
+
+func initDB() {
+
+	var err error
+	
+	db, err = sql.Open("sqlite", "urls.db")
+
+	if err != nil {
+		log.Fatalf("Fatal error trying to load the database: %v", err)
+	}
+
+	createTableQuery := `CREATE TABLE IF NOT EXISTS urls (
+		"short_code" TEXT PRIMARY KEY,
+		"long_url" TEXT NOT NULL
+	);`
+
+	_, err = db.Exec(createTableQuery)
+
+	if err != nil {
+		log.Fatalf("Fatal error trying to create the table: %v", err)
+	}
+
+	fmt.Println("Database initialized successfully.")
+
+}
+
 
 // All characters that can be used to create the new URL
 const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -55,8 +85,23 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, amountOfCharactersTo
 	// Generate a random string
 	randomString := generateRandomString(amountOfCharactersToUse)
 
-	// Store in the map
-	urlStore[randomString] = originalURL
+	stmt, err := db.Prepare("INSERT INTO urls(short_code, long_url) VALUES(?, ?)")
+
+	if err != nil {
+		http.Error(w, "Server error", http.StatusInternalServerError)
+		log.Printf("Error trying to prepare statement: %v", err)
+		return
+	}
+
+	defer stmt.Close()
+
+	_, err = stmt.Exec(randomString, originalURL)
+
+	if err != nil {
+		http.Error(w, "Server error", http.StatusInternalServerError)
+		log.Printf("Error trying to execute statement: %v", err)
+		return
+	}
 
 	shortURL := fmt.Sprintf("http://localhost:8080/%s", randomString)
 
@@ -70,13 +115,18 @@ func redirectHandler(w http.ResponseWriter, r *http.Request) {
 	// Drop the leading "/"
 	shortURL := r.URL.Path[1:]
 
-	originalURL, found := urlStore[shortURL]
+	var originalURL string
 
-	if !found {
+	err := db.QueryRow("SELECT long_url FROM urls WHERE short_code = ?", shortURL).Scan(&originalURL)
 
-		http.Error(w, "URL not found", http.StatusNotFound)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "URL not found", http.StatusNotFound)
+		} else {
+			http.Error(w, "Server error", http.StatusInternalServerError)
+			log.Printf("Erro within the database: %v", err)
+		}
 		return
-
 	}
 
 	if originalURL == "" {
@@ -88,6 +138,10 @@ func redirectHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+
+	initDB()
+
+	defer db.Close()
 
 	fmt.Println("Type the number of characters in the shortened variable")
 	amountOfCharactersToUse := 8
